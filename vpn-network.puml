@@ -1,0 +1,50 @@
+@startuml vpn-network
+
+!include <C4/C4_Container>
+
+AddContainerTag(element, \
+    $bgColor="White", \
+    $borderColor="Black", \
+    $fontColor="Black")
+
+Boundary(data_centre, "Data Centre") {
+
+Container(vpnServer, "VPN Server", $tags=element, \
+$descr=<img:img/host-hardware-svgrepo-com.svg{scale=0.1}>\n\
+* Public IP: 1.2.3.4 (Sample)\n\
+* Hosted in data centre\n\
+* Client-to-client network visibility is enabled)
+
+}
+
+Boundary(home_network, "Home Network") {
+
+' Container(router, "Router", $tags=element, $descr="<img:router-svgrepo-com.svg{scale=0.1}>\n\
+' * Gateway\n\
+' * Internal IP: 192.168.0.1\n\
+' * External IP: 84.115.239.139 (changes periodically)")
+
+    Container(vpnClient, "VPN Client", $tags=element, $descr="<img:img/server-svgrepo-com.svg{scale=0.1}>\n\
+* Client at home\n\
+* Common name: home-server\n\
+* IP: 192.168.0.15")
+
+}
+
+Boundary(remote, Remote Network){
+
+    Container(computer, "Client Computer", $tags=element, $descr="<img:img/monitor-svgrepo-com.svg{scale=0.1}>\n\
+* Remote user device\n\
+* Connected to a different network, e.g.: mobile hotspot of mobile phone")
+
+}
+
+' WithoutPropertyHeader()
+' AddProperty("PropC1", "ValueC1")
+' AddProperty("PropC2", "ValueC2")
+Rel(vpnClient, vpnServer, "Establishes VPN tunnel to", "UDP 1194 (OpenVPN)")
+Rel(computer, vpnServer, "Connects to", "UDP 1194 (OpenVPN)")
+
+HIDE_STEREOTYPE()
+
+@enduml

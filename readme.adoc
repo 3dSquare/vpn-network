@@ -1,0 +1,440 @@
+= OpenVPN Server with Client to Client Communication
+:toc:
+:toclevels: 5
+:sectnumlevels: 5
+:sectnums:
+
+== General
+
+This document describes how to set up an OpenVPN server that allows communication between connected clients (client-to-client communication). This setup is useful if you would like to access your home network devices from the internet.
+
+This is one of the possible ways in case you do not have a static IP address for a server running at home. Instead, you can use a VPS (Virtual Private Server) with a static IP address as an intermediary.
+
+== Requirements
+
+* VPS with a publicly accessible IP address
+* Server in your home network, could be a Raspberry Pi or any other device
+** Ideally something with a low power consumption, as this device will be running 24/7
+
+[IMPORTANT]
+====
+Create a backup of your VPS before you proceed, as misconfiguration of the network settings may lead to loss of access to the server.
+====
+
+== Setup
+
+.Overview:
+image::out/vpn-network.svg[]
+
+=== OpenVPN Server
+
+==== Certificates and Keys Generation
+
+.Steps:
+. Connect to the VPS via SSH and become the superuser
++
+[IMPORTANT]
+====
+Use `su -` to inherit the root user's environment variables. Otherwise the commandline client `openvpn` will not be found at a later stage.
+====
+. Update package lists and packages:
++
+[source,bash]
+----
+apt-get update && apt-get upgrade -y
+----
+. Install OpenVPN:
++
+[source,bash]
+----
+apt -y install openvpn easy-rsa iptables 
+----
+. Create CA and Certificates
+.. CA certificate:
++
+[source,bash]
+----
+cd /usr/share/easy-rsa
+./easyrsa init-pki
+./easyrsa build-ca # Create a passphrase and store it in your password manager! This will be used later to sign the certificates.
+----
+
+.. Server certificate:
++
+[source,bash]
+----
+./easyrsa build-server-full server nopass # Enter the common name "Server-CA"
+----
+... Answer with the passphrase of the CA certificate
+... This creates the `pki/private/server.key` and `pki/issued/server.crt` files
+
+.. Client certificates for the server at home:
++
+[source,bash]
+----
+./easyrsa build-client-full home-server nopass
+----
+... Answer with the passphrase of the CA certificate
+... This step creates `pki/private/home-server.key` and `pki/issued/home-server.crt`
+
+.. Client certificates for the roaming user:
++
+IMPORTANT: Update the user name `john-doe` to your desired user name.
++
+[source,bash]
+----
+./easyrsa build-client-full john-doe nopass
+----
+... Answer with the passphrase of the CA certificate
+... This step creates `pki/private/john-doe.key` and `pki/issued/john-doe.crt`
+
+. Generate Diffie-Hellman parameters:
++
+[source,bash]
+----
+./easyrsa gen-dh
+----
+.. This creates the `pki/dh.pem` file
+
+. Create the TLS-Auth key:
++
+[source,bash]
+----
+openvpn --genkey secret ./pki/ta.key 
+----
+
+. Copy the generated certificates to the OpenVPN directory:
++
+[source,bash]
+----
+cp -pR /usr/share/easy-rsa/pki/{issued,private,ca.crt,dh.pem,ta.key} /etc/openvpn/server/ 
+----
+
+==== Configure the OpenVPN Server
+
+.Steps:
+. Copy the sample configuration file:
++
+[source,bash]
+----
+cp /usr/share/doc/openvpn/examples/sample-config-files/server.conf /etc/openvpn/server/ 
+----
+. Edit the file:
++
+[source,bash]
+----
+nano /etc/openvpn/server/server.conf
+----
+.. Update lines 78-89 to read:
++
+[source,text]
+----
+ca ca.crt
+cert issued/server.crt
+key private/server.key  # This file should be kept secret
+----
+.. Line 85:
++
+[source,text]
+----
+dh dh.pem
+----
+.. Line 141:
++
+[source,text]
+----
+push "route 192.168.0.0 255.255.0.0"
+;push "route 192.168.20.0 255.255.255.0"
+----
+.. Line 155:
++
+[source,text]
+----
+client-config-dir ccd
+route 192.168.0.0 255.255.0.0
+----
+.. Line 209 to be uncommented:
++
+[source,text]
+----
+client-to-client
+----
+.. Line 244:
++
+[source,text]
+----
+ tls-auth ta.key 0
+----
+.. Line 263:
++
+[source,text]
+----
+comp-lzo
+----
+. Save and close the `server.conf` file
+. Create the `ccd` (Client Config Directory):
++
+[source,bash]
+----
+mkdir -p /etc/openvpn/server/ccd
+----
+. Create the client configuration file for the `home-server`:
+.. Create the file:
++
+[source,bash]
+----
+nano /etc/openvpn/server/ccd/home-server
+----
+.. Add the contents:
++
+[source,text]
+----
+iroute 192.168.0.0 255.255.0.0
+----
+. Configure the network bridging and IP forwarding:
+.. Copy the files `add-bridge.sh` and `remove-bridge.sh`:
++
+[source,bash]
+----
+cp scripts/* /etc/openvpn/server/
+----
+.. Update user rights:
++
+[source,bash]
+----
+chmod 700 /etc/openvpn/server/{add-bridge.sh,remove-bridge.sh}
+----
+.. Configure the unit file for the OpenVPN server to use the scripts:
++
+[source,bash]
+----
+nano /lib/systemd/system/openvpn-server@.service
+----
+... Append to the `[Service]` section:
++
+[source,text]
+----
+ExecStartPost=/etc/openvpn/server/add-bridge.sh
+ExecStopPost=/etc/openvpn/server/remove-bridge.sh
+----
+... Save and close the file
+.. Reload the systemd daemon:
++
+[source,bash]
+----
+systemctl daemon-reload
+systemctl enable --now openvpn-server@server 
+----
+
+.Copy the certificates to your workstation:
+. Switch into the OpenVPN server directory:
++
+[source,bash]
+----
+cd /etc/openvpn/server
+----
+. Create a tarball with the required files:
++
+[source,bash]
+----
+tar tar cfzv vpn-certs.tar.gz ca.crt ta.key issued/* private/*
+----
+. Move the tarball to your home directory:
++
+[source,bash]
+----
+exit # to exit the root session and go back to your user
+sudo mv /etc/openvpn/server/vpn-certs.tar.gz ~
+----
+
+. Change the owner of the file so it can be downloaded via `scp`:
++
+[source,bash]
+----
+sudo chown <your-username>:<your-username> ~/vpn-certs.tar.gz
+----
+
+. From your workstation, open a terminal window and download the tarball via `scp`:
++
+[source,bash]
+----
+scp <your-username>@1.2.3.4:/home/<your-username>/vpn-certs.tar.gz .
+----
++
+NOTE: This also works in the Windows PowerShell!
+
+=== Configure the OpenVPN Client on the Home Server
+
+.Steps:
+. Copy the `vpn-certs.tar.gz` to your home server, you could reuse the same `scp` command as above
+. Install OpenVPN on the home server:
++
+[source,bash]
+----
+sudo apt -y install openvpn
+----
+. Create the client configuration file:
++
+[source,bash]
+----
+sudo cp /usr/share/doc/openvpn/examples/sample-config-files/client.conf /etc/openvpn/client/
+----
+. Edit the file:
++
+[source,bash]
+----
+sudo nano /etc/openvpn/client/client.conf
+----
+.. Update the line 42 to point to the IP of the VPS:
++
+[source,text]
+----
+remote 1.2.3.4 1194
+----
+.. Update lines 88-71 to read:
++
+[source,text]
+----
+ca ca.crt
+cert issued/home-server.crt
+key private/home-server.key
+----
+.. Line 121:
++
+[source,text]
+----
+comp-lzo
+----
+. Save and close the file
+. Extract the certificates:
++
+[source,bash]
+----
+sudo tar xfvz ~/vpn-certs.tar.gz -C /etc/openvpn/client/
+----
+.. Remove the tarball and the certificate files that are not relevant for this client!
+
+. From your workstation, copy the scripts to the OpenVPN client directory:
++
+[source,bash]
+----
+scp scripts/* <your-username>@192.168.1.15:/home/<your-username>/
+----
+.. Back on the home server, update the two shell scripts to use the correct network interface, change the `IF=enp1s0` to `IF=eth0` or whatever interface is used to connect to your home network
+.. Be sure to update both scripts: `add-bridge.sh` and `remove-bridge.sh`!
+.. Move the scripts to the OpenVPN client directory:
++
+[source,bash]
+----
+sudo mv ~/{add-bridge,remove-bridge}.sh /etc/openvpn/client
+----
+.. Configure these scripts to be used in the OpenVPN client unit file:
++
+[source,bash]
+----
+nano /lib/systemd/system/openvpn-client@.service
+----
+... Append to the `[Service]` section:
++
+[source,text]
+----
+ExecStartPost=/etc/openvpn/client/add-bridge.sh
+ExecStopPost=/etc/openvpn/client/remove-bridge.sh
+----
+
+. Configure the OpenVPN client to start on boot:
++
+[source,bash]
+----
+sudo systemctl enable --now openvpn-client@client
+sudo systemctl start openvpn-client@client
+----
+. Verify the connection:
++
+[source,bash]
+----
+ping 10.8.0.1 # should be the IP of the OpenVPN server!
+----
+. Verify that you can access devices in your home network, e.g.:
+.. Connect to the VPS server again
+.. Ping a device in your home network:
++
+[source,bash]
+----
+ping 192.168.1.15 # should be the IP of eth0 of your VPN Client (home-server)
+----
+.. Additionally, ping other machines, other than the VPN client, in your home network to verify that client-to-client communication is working:
++
+[source,bash]
+----
+ping 192.168.1.1 # e.g.: the IP of your router/gateway
+----
+
+=== Prepare the Roaming Client Configuration
+
+For this client, a `.ovpn` file will be created that holds all necessary information to connect to the OpenVPN server. This file can be used from Windows, Linux, and Android mobile phones.
+
+.Steps:
+. Create an `.ovpn` file on your workstation using a text editor, where the file name represents the common name of the client (e.g.: `john-doe.ovpn`), with these contents:
++
+[source,text]
+----
+client
+dev tun
+proto udp
+remote 1.2.3.4 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+cipher AES-256-CBC
+verb 3
+keepalive 10 120
+comp-lzo
+key-direction 1
+
+<ca>
+-----BEGIN CERTIFICATE-----
+<add contents of ca.crt here>
+-----END CERTIFICATE-----
+</ca>
+<cert>
+<add contents of issued/john-doe.crt here>
+</cert>
+<key>
+-----BEGIN PRIVATE KEY-----
+<add contents of private/john-doe.key here>
+-----END PRIVATE KEY-----
+</key>
+<tls-auth>
+#
+# 2048 bit OpenVPN static key
+#
+-----BEGIN OpenVPN Static key V1-----
+<add contents of ta.key here>
+-----END OpenVPN Static key V1-----
+</tls-auth>
+----
+.. Update the contents as required, especially the `remote` line with the IP address of your VPS server
+. Copy this file on your roaming devices and import it into the OpenVPN client application of your choice
+
+== Troubleshooting
+
+* To read the OpenVPN server logs:
++
+[source,bash]
+----
+journalctl -u openvpn-server@service -f
+----
+* View IP address settings in the Linux bash:
++
+[source,bash]
+----
+ip address # output should list tun0 with an VPN IP
+----
+
+== Resources
+
+* https://www.server-world.info/en/note?os=Debian_11&p=openvpn&f=1[Server-World OpenVPN Guide]
+** This guide is largely based on this, with some adaptations to create a second client certificate and the `ccd` configuration for client-to-client communication
